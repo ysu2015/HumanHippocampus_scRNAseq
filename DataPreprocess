@@ -1,8 +1,30 @@
 ### normalize and scale dataset
-wt<-readRDS("")
+wt<-readRDS("min10_G4005k_R2000_m001.rds")
 wt <- NormalizeData(object = wt, normalization.method = "LogNormalize", 
                     scale.factor = 10000)
 
 wt <- FindVariableGenes(object =wt, mean.function = ExpMean, dispersion.function = LogVMR, 
                         x.low.cutoff = 0.0125, x.high.cutoff = 4, y.cutoff = 0.8)
 length(x = wt@var.genes) # 2018
+
+wt <- ScaleData(object = wt,  genes.use= wt@var.genes, vars.to.regress = c("nUMI", "percent.mito"),do.par = TRUE, num.cores = 6)
+wt <- RunPCA(object = wt, pc.genes = wt@var.genes, do.print = TRUE, pcs.print = 1:15, 
+             genes.print = 5, pcs.compute=100)
+wt <- ProjectPCA(object = wt, do.print = FALSE)
+
+# for select probably pcs. use pc=60 further analysis
+PCElbowPlot(object = wt, num.pc = 100)
+
+wt <- FindClusters(object =wt, reduction.type = "pca", dims.use = 1:60, resolution = c(0.6,0.8,1,1.5,2,2.5,3), 
+                   save.SNN = TRUE, n.start = 10, nn.eps = 0.5, print.output = TRUE)
+wt <- RunTSNE(object = wt, dims.use = 1:60, do.fast = TRUE)
+
+# plot tSNE plot, group by clusters
+wt<-SetAllIdent(wt,id="res.1")
+TSNEPlot(object = wt,do.label=TRUE,pt.size=0.2,no.legend=F,do.ret=T,label.size = 10)
+
+# Featureplot for known markers on different cell types
+my.genes<-c("NRGN","GAD2","AQP4","SLC1A2","MOBP","PCDH15","CD74","VCAN","PDGFRA","FLT1","SYT1","SNAP25")
+FeaturePlot(wt, features.plot=my.genes, pt.size=0.5,cols.use = c("gray", "red"),no.axes = T,
+            no.legend = T,dark.theme=FALSE)
+            
