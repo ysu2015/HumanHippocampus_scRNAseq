@@ -1,0 +1,8 @@
+### normalize and scale dataset
+wt<-readRDS("")
+wt <- NormalizeData(object = wt, normalization.method = "LogNormalize", 
+                    scale.factor = 10000)
+
+wt <- FindVariableGenes(object =wt, mean.function = ExpMean, dispersion.function = LogVMR, 
+                        x.low.cutoff = 0.0125, x.high.cutoff = 4, y.cutoff = 0.8)
+length(x = wt@var.genes) # 2018
