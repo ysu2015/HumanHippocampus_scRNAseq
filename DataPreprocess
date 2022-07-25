@@ -1,30 +1,188 @@
-### normalize and scale dataset
-wt<-readRDS("min10_G4005k_R2000_m001.rds")
-wt <- NormalizeData(object = wt, normalization.method = "LogNormalize", 
-                    scale.factor = 10000)
+######### reference ######
+https://satijalab.org/seurat/articles/integration_rpca.html
 
-wt <- FindVariableGenes(object =wt, mean.function = ExpMean, dispersion.function = LogVMR, 
-                        x.low.cutoff = 0.0125, x.high.cutoff = 4, y.cutoff = 0.8)
-length(x = wt@var.genes) # 2018
+CCA is well-suited for identifying anchors when cell types are conserved, but there are very substantial differences in gene expression across experiments. 
+1)integrative analysis when experimental conditions or disease states introduce very strong expression shifts, 
+2)when integrating datasets across modalities and species
+However, CCA-based integration may also lead to overcorrection, especially when a large proportion of cells are non-overlapping across datasets.
 
-wt <- ScaleData(object = wt,  genes.use= wt@var.genes, vars.to.regress = c("nUMI", "percent.mito"),do.par = TRUE, num.cores = 6)
-wt <- RunPCA(object = wt, pc.genes = wt@var.genes, do.print = TRUE, pcs.print = 1:15, 
-             genes.print = 5, pcs.compute=100)
-wt <- ProjectPCA(object = wt, do.print = FALSE)
+RPCA-based integration runs significantly faster, 
+and also represents a more conservative approach where cells in different biological states are less likely to 'align' after integration. 
+* A substantial fraction of cells in one dataset have no matching type in the other 
+* Datasets originate from the same platform (i.e. multiple lanes of 10x genomics) 
+* There are a large number of datasets or cells to integrate (see INSERT LINK for more tips on integrating large datasets)
 
-# for select probably pcs. use pc=60 further analysis
-PCElbowPlot(object = wt, num.pc = 100)
+################################################################################
+################################################################################
+################################################################################
+################################################################################
 
-wt <- FindClusters(object =wt, reduction.type = "pca", dims.use = 1:60, resolution = c(0.6,0.8,1,1.5,2,2.5,3), 
-                   save.SNN = TRUE, n.start = 10, nn.eps = 0.5, print.output = TRUE)
-wt <- RunTSNE(object = wt, dims.use = 1:60, do.fast = TRUE)
+library('Seurat')
+packageVersion("Seurat")
+library('Matrix')
+library("dplyr")
+library("tidyr")
+library(stringr)
+library("reshape2")
+library(ggplot2)
 
-# plot tSNE plot, group by clusters
-wt<-SetAllIdent(wt,id="res.1")
-TSNEPlot(object = wt,do.label=TRUE,pt.size=0.2,no.legend=F,do.ret=T,label.size = 10)
 
-# Featureplot for known markers on different cell types
-my.genes<-c("NRGN","GAD2","AQP4","SLC1A2","MOBP","PCDH15","CD74","VCAN","PDGFRA","FLT1","SYT1","SNAP25")
-FeaturePlot(wt, features.plot=my.genes, pt.size=0.5,cols.use = c("gray", "red"),no.axes = T,
-            no.legend = T,dark.theme=FALSE)
-            
+setwd("./")
+#### data integration to remove batch effect ###
+ifnb<-readRDS("single.All_info_gene200To8K_MT5_scDblFinder.batch16.rds")
+# split the dataset into a list of seurat objects
+ifnb.list <- SplitObject(ifnb, split.by = "Batch")
+
+# normalize and identify variable features for each dataset independently
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+# select features that are repeatedly variable across datasets for integration run PCA on each
+# dataset using these features
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+  x <- ScaleData(x, features = features, 
+                 vars.to.regress = c("nCount_RNA", "percent.mt"),
+                 verbose = FALSE)
+  x <- RunPCA(x, features = features, verbose = FALSE)
+})
+
+# perform integration
+immune.anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features, reduction = "rpca")
+
+immune.combined <- IntegrateData(anchorset = immune.anchors,features.to.integrate)
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, 
+                             vars.to.regress = c("nCount_RNA", "percent.mt"),
+                             verbose = FALSE)
+immune.combined <- RunPCA(immune.combined, npcs = 100, verbose = FALSE)
+
+immune.combined <- JackStraw(immune.combined,
+                             dims=100,
+                             num.replicate = 100)
+immune.combined <- ScoreJackStraw(immune.combined, dims = 1:100)
+
+#################
+# determine pcs to use for downstream
+JackStrawPlot(immune.combined, dims = 1:50)
+JackStrawPlot(immune.combined, dims = 50:100)
+ElbowPlot(immune.combined, ndims = 100, reduction = "pca")
+
+DefaultAssay(immune.combined) <- "integrated"
+immune.combined
+#An object of class Seurat 
+#30723 features across 224464 samples within 2 assays 
+#Active assay: integrated (2000 features, 2000 variable features)
+#1 other assay present: RNA
+#1 dimensional reduction calculated: pca
+
+print(immune.combined[["pca"]], dim=1:5, nfeatures = 10)
+DimHeatmap(immune.combined, dims = 31:45, cells = 500, balanced = TRUE)
+
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:100)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:100)
+immune.combined <- FindClusters(immune.combined, resolution = c(0.1))
+
+#DimPlot(immune.combined, group.by = c("integrated_snn_res.0.1"), split.by=c("integrated_snn_res.0.1"),ncol=5,label=T, combine = T)
+
+tiff("pc100-res01-800.tiff",width = 800,height = 800)
+DimPlot(immune.combined, group.by = c("integrated_snn_res.0.1"),ncol=1,label=T, combine = T)
+dev.off()
+
+tiff("pc100-res01_noLeg.tiff",width = 800,height = 800)
+DimPlot(immune.combined, group.by = c("integrated_snn_res.0.1"),ncol=1,label=T, combine = T)+NoLegend()
+dev.off()
+
+#### Annotate Group with cluster markers ## 
+wt<-immune.combined
+head(wt[[]])
+Idents(wt)<-"integrated_snn_res.0.1"
+table(Idents(wt))
+C0<-WhichCells(object = wt,  ident = c(8,5,0,19,20,18,9,15,4))
+Idents(object = wt,cells= C0)<- "Glu_Neuron"
+
+C1<-WhichCells(object = wt,  ident = c(2))
+Idents(object = wt,cells =C1) <-"Astrocytes"
+
+C4<-WhichCells(object = wt,  ident = c(7,11,6,12))
+Idents(object = wt,cells = C4)<- 'GABA_Neuron'
+
+C6<-WhichCells(object = wt,  ident = c(1))
+Idents(object = wt,cells = C6)<-'Olig'
+
+C8<-WhichCells(object = wt,  ident = c(3,16))
+Idents(object = wt,cells= C8) <-'OPC'
+
+C17<-WhichCells(object = wt,  ident = c(13))
+Idents(object = wt,cells = C17)<- 'Ependymal'
+
+C18<-WhichCells(object = wt,  ident = c(10))
+Idents(object = wt,cells = C18)<- 'Microglial'
+
+C19<-WhichCells(object = wt,  ident = c(14))
+Idents(object = wt,cells = C19)<- 'Endothelial'
+
+C20<-WhichCells(object = wt,  ident = c(17))
+Idents(object = wt,cells = C20)<- 'Epithelial'
+
+C21<-WhichCells(object = wt,  ident = c(21))
+Idents(object = wt,cells = C21)<- 'Cajal-Retzius'
+
+wt[["MajorCellTypes"]] <- Idents(object = wt)
+table(Idents(wt))
+immune.combined<-wt
+
+tiff("cluster.tiff",width = 800, height = 800)
+DimPlot(object = immune.combined, reduction= "umap", 
+        group.by = "MajorCellTypes", label = F)
+dev.off()
+saveRDS(immune.combined, "All.integrated.annotated.rds")
+
+#####################################
+DefaultAssay(wt)<-"RNA"
+Idents(wt)<-"MajorCellTypes"
+age.markers<-FindAllMarkers(wt,
+                            assay="RNA",
+                            logfc.threshold = 0.25,
+                            test.use="wilcox", 
+                            slot = "data",
+                            only.pos=T,
+                            min.pct=0.1,
+                            verbose = T,
+                            return.thresh=0.05)
+head(age.markers)
+nrow(age.markers) 
+write.csv(age.markers,"wholeSet_markers_MajorCellTypes_wilcox_RNAdata_cutoff025_010_005.csv")
+###############
+
+# getsub cluster for further analysis
+
+wt<-pancreas.integrated
+table(wt[["MajorCellTypes"]])
+
+GABA <- subset(x = wt, subset = MajorCellTypes == "Microglial")
+GABA <- droplevels(x = GABA)
+table(Idents(GABA))
+GABA
+saveRDS(GABA,"all_MG.rds") # 
+
+GABA <- subset(x = wt, subset = MajorCellTypes == "Astrocytes")
+GABA <- droplevels(x = GABA)
+table(Idents(GABA))
+GABA
+saveRDS(GABA,"all_AST.rds")# 
+
+GABA <- subset(x = wt, subset = MajorCellTypes %in% c("OPC","Olig"))
+GABA <- droplevels(x = GABA)
+table(Idents(GABA))
+GABA
+saveRDS(GABA,"all_OPCOlig.rds") # 
+#################################
